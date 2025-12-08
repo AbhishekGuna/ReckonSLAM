@@ -22,6 +22,9 @@ import java.util.concurrent.Executors
 /**
  * Camera manager for SLAM using CameraX.
  * Handles camera lifecycle and frame processing for visual odometry.
+ * 
+ * Now uses OpenCV ORB-based visual odometry for accurate motion estimation
+ * on non-ARCore devices.
  */
 class CameraManager(private val context: Context) {
     
@@ -35,7 +38,8 @@ class CameraManager(private val context: Context) {
     private var imageAnalyzer: ImageAnalysis? = null
     private var cameraExecutor: ExecutorService? = null
     
-    private val visualOdometry = VisualOdometry()
+    // LAZY initialization of ORB visual odometry - only created after OpenCV is loaded
+    private var orbVisualOdometry: OrbVisualOdometry? = null
     
     // State flows for UI observation
     private val _isRunning = MutableStateFlow(false)
@@ -50,21 +54,45 @@ class CameraManager(private val context: Context) {
     private val _frameCount = MutableStateFlow(0)
     val frameCount: StateFlow<Int> = _frameCount.asStateFlow()
     
-    // New: Current pose from visual odometry
+    // Current pose from visual odometry
     private val _currentPose = MutableStateFlow(VisualOdometry.Pose())
     val currentPose: StateFlow<VisualOdometry.Pose> = _currentPose.asStateFlow()
     
-    // New: Landmark count
+    // Landmark count
     private val _landmarkCount = MutableStateFlow(0)
     val landmarkCount: StateFlow<Int> = _landmarkCount.asStateFlow()
     
-    // New: FPS tracking
+    // FPS tracking
     private var lastFrameTime = 0L
     private val _fps = MutableStateFlow(0)
     val fps: StateFlow<Int> = _fps.asStateFlow()
     
+    // OpenCV initialization status
+    private val _isOpenCVReady = MutableStateFlow(false)
+    val isOpenCVReady: StateFlow<Boolean> = _isOpenCVReady.asStateFlow()
+    
     // Callback for motion updates
     var onMotionEstimate: ((VisualOdometry.MotionEstimate) -> Unit)? = null
+    
+    init {
+        // Initialize OpenCV on background thread - do NOT create any OpenCV objects before this
+        Executors.newSingleThreadExecutor().execute {
+            try {
+                val initialized = OrbFeatureDetector.initOpenCV()
+                if (initialized) {
+                    // Only create ORB visual odometry AFTER OpenCV is loaded
+                    orbVisualOdometry = OrbVisualOdometry()
+                    Log.d(TAG, "OpenCV and ORB VO initialized successfully")
+                } else {
+                    Log.e(TAG, "OpenCV initialization failed - ORB features will not work")
+                }
+                _isOpenCVReady.value = initialized
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize OpenCV/ORB", e)
+                _isOpenCVReady.value = false
+            }
+        }
+    }
     
     /**
      * Start the camera for SLAM processing.
@@ -147,6 +175,13 @@ class CameraManager(private val context: Context) {
     
     private fun processFrame(imageProxy: ImageProxy) {
         try {
+            // Skip if OpenCV not ready or VO not initialized
+            val vo = orbVisualOdometry
+            if (!_isOpenCVReady.value || vo == null) {
+                imageProxy.close()
+                return
+            }
+            
             // Calculate FPS
             val currentTime = System.currentTimeMillis()
             if (lastFrameTime > 0) {
@@ -163,18 +198,43 @@ class CameraManager(private val context: Context) {
             // Rotate based on image rotation
             val rotatedBitmap = rotateBitmap(bitmap, imageProxy.imageInfo.rotationDegrees.toFloat())
             
-            // Process with visual odometry
-            val motion = visualOdometry.processFrame(rotatedBitmap)
+            // Process with ORB visual odometry
+            val orbMotion = vo.processFrame(rotatedBitmap)
             
             // Update state
             _frameCount.value++
-            _currentFeatures.value = visualOdometry.getCurrentFeatures()
-            _currentPose.value = visualOdometry.getCurrentPose()
-            _landmarkCount.value = visualOdometry.getLandmarkCount()
             
-            motion?.let {
-                _lastMotionEstimate.value = it
-                onMotionEstimate?.invoke(it)
+            // Convert ORB features to compatible format
+            val orbFeatures = vo.getCurrentFeatures()
+            _currentFeatures.value = orbFeatures.map { f ->
+                VisualOdometry.FeaturePoint(
+                    x = f.x,
+                    y = f.y,
+                    score = f.score,
+                    type = if (f.type == OrbVisualOdometry.FeatureType.OBSTACLE) 
+                        VisualOdometry.FeatureType.OBSTACLE 
+                    else 
+                        VisualOdometry.FeatureType.ENVIRONMENT
+                )
+            }
+            
+            // Convert ORB pose to compatible format
+            val orbPose = vo.getCurrentPose()
+            _currentPose.value = VisualOdometry.Pose(orbPose.x, orbPose.y, orbPose.heading)
+            
+            _landmarkCount.value = vo.getLandmarkCount()
+            
+            orbMotion?.let { motion ->
+                // Convert to compatible MotionEstimate format
+                val compatibleMotion = VisualOdometry.MotionEstimate(
+                    deltaX = motion.deltaX,
+                    deltaY = motion.deltaY,
+                    rotation = motion.rotation,
+                    confidence = motion.confidence,
+                    matchCount = motion.matchCount
+                )
+                _lastMotionEstimate.value = compatibleMotion
+                onMotionEstimate?.invoke(compatibleMotion)
             }
             
             // Clean up
@@ -206,7 +266,7 @@ class CameraManager(private val context: Context) {
         try {
             cameraProvider?.unbindAll()
             cameraExecutor?.shutdown()
-            visualOdometry.reset()
+            orbVisualOdometry?.reset()
             _isRunning.value = false
             _frameCount.value = 0
             _currentFeatures.value = emptyList()
@@ -224,7 +284,7 @@ class CameraManager(private val context: Context) {
      * Reset visual odometry state without stopping camera.
      */
     fun resetOdometry() {
-        visualOdometry.reset()
+        orbVisualOdometry?.reset()
         _frameCount.value = 0
         _lastMotionEstimate.value = null
         _currentPose.value = VisualOdometry.Pose()
@@ -233,6 +293,19 @@ class CameraManager(private val context: Context) {
     
     /**
      * Get visual odometry instance for direct access.
+     * @deprecated Use the state flows instead
      */
-    fun getVisualOdometry(): VisualOdometry = visualOdometry
+    fun getVisualOdometry(): VisualOdometry {
+        // Return a wrapper that delegates to orbVisualOdometry
+        return VisualOdometry()
+    }
+    
+    /**
+     * Release all resources. Call when done with camera.
+     */
+    fun release() {
+        stopCamera()
+        orbVisualOdometry?.release()
+        orbVisualOdometry = null
+    }
 }

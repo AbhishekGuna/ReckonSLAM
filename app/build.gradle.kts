@@ -92,4 +92,7 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
+    
+    // OpenCV for ORB feature detection
+    implementation("org.opencv:opencv:4.9.0")
 }
