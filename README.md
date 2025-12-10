@@ -2,8 +2,8 @@
 
 **ReckonSLAM** is a lightweight Android app that demonstrates camera-based **Dead Reckoning (DR)** and **basic Visual SLAM** (feature-based). The project is educational and focused on clarity — it shows VO/DR behavior and provides diagnostic tools to help evaluate and demonstrate tracking quality.
 
-**Repository:** [https://github.com/AbhishekGuna/ReckonSLAM](https://github.com/AbhishekGuna/ReckonSLAM)
-**Demo (unlisted):** [https://drive.google.com/drive/folders/1a8vefgEPwJSAnBktxZe_kVRn7sgvOSXw](https://drive.google.com/drive/folders/1a8vefgEPwJSAnBktxZe_kVRn7sgvOSXw)
+**Repository:** https://github.com/AbhishekGuna/ReckonSLAM  
+**Demo (unlisted):** https://drive.google.com/drive/folders/1a8vefgEPwJSAnBktxZe_kVRn7sgvOSXw
 
 ---
 
